@@ -72,7 +72,6 @@ const char *ossl_provider_name(const OSSL_PROVIDER *prov);
 const DSO *ossl_provider_dso(const OSSL_PROVIDER *prov);
 const char *ossl_provider_module_name(const OSSL_PROVIDER *prov);
 const char *ossl_provider_module_path(const OSSL_PROVIDER *prov);
-void *ossl_provider_prov_ctx(const OSSL_PROVIDER *prov);
 const OSSL_DISPATCH *ossl_provider_get0_dispatch(const OSSL_PROVIDER *prov);
 OSSL_LIB_CTX *ossl_provider_libctx(const OSSL_PROVIDER *prov);
 
@@ -85,6 +84,8 @@ int ossl_provider_get_capabilities(const OSSL_PROVIDER *prov,
                                    OSSL_CALLBACK *cb,
                                    void *arg);
 int ossl_provider_self_test(const OSSL_PROVIDER *prov);
+int ossl_provider_random_bytes(const OSSL_PROVIDER *prov, int which,
+                               void *buf, size_t n, unsigned int strength);
 const OSSL_ALGORITHM *ossl_provider_query_operation(const OSSL_PROVIDER *prov,
                                                     int operation_id,
                                                     int *no_cache);
