@@ -12915,10 +12915,11 @@ static int alert_cb(SSL *s, unsigned char alert_code, void *arg)
  * Test 1: Force a failure
  * Test 3: Use a CCM based ciphersuite
  * Test 4: fail yield_secret_cb to see double free
+ * Test 5: Normal run with SNI
  */
 static int test_quic_tls(int idx)
 {
-    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL_CTX *sctx = NULL, *sctx2 = NULL, *cctx = NULL;
     SSL *serverssl = NULL, *clientssl = NULL;
     int testresult = 0;
     OSSL_DISPATCH qtdis[] = {
@@ -12946,6 +12947,7 @@ static int test_quic_tls(int idx)
     if (idx == 4)
         qtdis[3].function = (void (*)(void))yield_secret_cb_fail;
 
+    snicb = 0;
     memset(secret_history, 0, sizeof(secret_history));
     secret_history_idx = 0;
     memset(&sdata, 0, sizeof(sdata));
@@ -12959,6 +12961,18 @@ static int test_quic_tls(int idx)
                                        TLS_client_method(), TLS1_3_VERSION, 0,
                                        &sctx, &cctx, cert, privkey)))
         goto end;
+
+    if (idx == 5) {
+        if (!TEST_true(create_ssl_ctx_pair(libctx, TLS_server_method(), NULL,
+                                           TLS1_3_VERSION, 0,
+                                           &sctx2, NULL, cert, privkey)))
+            goto end;
+
+        /* Set up SNI */
+        if (!TEST_true(SSL_CTX_set_tlsext_servername_callback(sctx, sni_cb))
+                || !TEST_true(SSL_CTX_set_tlsext_servername_arg(sctx, sctx2)))
+            goto end;
+    }
 
     if (!TEST_true(create_ssl_objects(sctx, cctx, &serverssl, &clientssl, NULL,
                                       NULL)))
@@ -12998,6 +13012,12 @@ static int test_quic_tls(int idx)
         testresult = 1;
         sdata.err = 0;
         goto end;
+    }
+
+    /* We should have had the SNI callback called exactly once */
+    if (idx == 5) {
+        if (!TEST_int_eq(snicb, 1))
+            goto end;
     }
 
     /* Check no problems during the handshake */
@@ -13041,6 +13061,7 @@ static int test_quic_tls(int idx)
  end:
     SSL_free(serverssl);
     SSL_free(clientssl);
+    SSL_CTX_free(sctx2);
     SSL_CTX_free(sctx);
     SSL_CTX_free(cctx);
 
@@ -13223,6 +13244,79 @@ static int test_quic_tls_early_data(void)
     return testresult;
 }
 #endif /* !defined(OSSL_NO_USABLE_TLS1_3) */
+
+static int test_no_renegotiation(int idx)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *serverssl = NULL, *clientssl = NULL;
+    int testresult = 0, ret;
+    int max_proto;
+    const SSL_METHOD *sm, *cm;
+    unsigned char buf[5];
+
+    if (idx == 0) {
+#ifndef OPENSSL_NO_TLS1_2
+        max_proto = TLS1_2_VERSION;
+        sm = TLS_server_method();
+        cm = TLS_client_method();
+#else
+        return TEST_skip("TLSv1.2 is disabled in this build");
+#endif
+    } else {
+#ifndef OPENSSL_NO_DTLS1_2
+        max_proto = DTLS1_2_VERSION;
+        sm = DTLS_server_method();
+        cm = DTLS_client_method();
+#else
+        return TEST_skip("DTLSv1.2 is disabled in this build");
+#endif
+    }
+    if (!TEST_true(create_ssl_ctx_pair(libctx, sm, cm, 0, max_proto,
+                                       &sctx, &cctx, cert, privkey)))
+        goto end;
+
+    SSL_CTX_set_options(sctx, SSL_OP_NO_RENEGOTIATION);
+
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &serverssl, &clientssl, NULL,
+                                      NULL)))
+        goto end;
+
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE)))
+        goto end;
+
+    if (!TEST_true(SSL_renegotiate(clientssl))
+            || !TEST_int_le(ret = SSL_connect(clientssl), 0)
+            || !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+        goto end;
+
+    /*
+     * We've not sent any application data, so we expect this to fail. It should
+     * also read the renegotiation attempt, and send back a no_renegotiation
+     * warning alert because we have renegotiation disabled.
+     */
+    if (!TEST_int_le(ret = SSL_read(serverssl, buf, sizeof(buf)), 0))
+        goto end;
+    if (!TEST_int_eq(SSL_get_error(serverssl, ret), SSL_ERROR_WANT_READ))
+        goto end;
+
+    /*
+     * The client should now see the no_renegotiation warning and fail the
+     * connection
+     */
+    if (!TEST_int_le(ret = SSL_connect(clientssl), 0)
+            || !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_SSL)
+            || !TEST_int_eq(ERR_GET_REASON(ERR_get_error()), SSL_R_NO_RENEGOTIATION))
+        goto end;
+
+    testresult = 1;
+ end:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
 
 OPT_TEST_DECLARE_USAGE("certfile privkeyfile srpvfile tmpfile provider config dhfile\n")
 
@@ -13552,9 +13646,10 @@ int setup_tests(void)
 #endif
     ADD_ALL_TESTS(test_alpn, 4);
 #if !defined(OSSL_NO_USABLE_TLS1_3)
-    ADD_ALL_TESTS(test_quic_tls, 5);
+    ADD_ALL_TESTS(test_quic_tls, 6);
     ADD_TEST(test_quic_tls_early_data);
 #endif
+    ADD_ALL_TESTS(test_no_renegotiation, 2);
     return 1;
 
  err:
